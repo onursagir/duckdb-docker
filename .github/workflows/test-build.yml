@@ -1,0 +1,109 @@
+name: Test Build (no push)
+on:
+  workflow_dispatch:
+    inputs:
+      duckdb_version:
+        description: DuckDB version to test. Without leading 'v'!
+        type: string
+        required: true
+        default: '1.2.1'
+      test_distroless:
+        description: Test distroless image build
+        type: boolean
+        default: true
+      test_shell:
+        description: Test shell image build
+        type: boolean
+        default: true
+
+jobs:
+  distroless:
+    if: ${{ inputs.test_distroless }}
+    runs-on: ubuntu-latest
+    env:
+      VER: ${{ inputs.duckdb_version }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Download DuckDB binaries
+        shell: bash
+        run: |
+         curl -s -L -o duckdb_cli-linux-amd64.zip "https://install.duckdb.org/v$VER/duckdb_cli-linux-amd64.zip"
+         curl -s -L -o duckdb_cli-linux-arm64.zip "https://install.duckdb.org/v$VER/duckdb_cli-linux-arm64.zip"
+         unzip -p duckdb_cli-linux-amd64.zip duckdb > duckdb_amd64
+         unzip -p duckdb_cli-linux-arm64.zip duckdb > duckdb_arm64
+         chmod +x duckdb_*
+
+      - name: Create Dockerfile
+        shell: bash
+        run: |
+         cat > Dockerfile <<- EOM
+         FROM gcr.io/distroless/cc-debian12
+         ARG TARGETPLATFORM
+         ARG TARGETARCH
+         COPY duckdb_\$TARGETARCH /duckdb
+         CMD ["/duckdb"]
+         ENV PATH="\$PATH:/"
+         EOM
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: duckdb-distroless:test
+
+      - name: Test version
+        run: |
+          REPORTED_VER=`docker run --rm duckdb-distroless:test duckdb -csv -noheader -c "SELECT version()"`
+          echo "Reported: $REPORTED_VER, Expected: v$VER"
+          [ "$REPORTED_VER" = "v$VER" ] || exit 1
+
+  shell:
+    if: ${{ inputs.test_shell }}
+    runs-on: ubuntu-latest
+    env:
+      VER: ${{ inputs.duckdb_version }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Download DuckDB binaries
+        shell: bash
+        run: |
+          curl -s -L -o duckdb_cli-linux-amd64.zip "https://install.duckdb.org/v$VER/duckdb_cli-linux-amd64.zip"
+          curl -s -L -o duckdb_cli-linux-arm64.zip "https://install.duckdb.org/v$VER/duckdb_cli-linux-arm64.zip"
+          unzip -p duckdb_cli-linux-amd64.zip duckdb > duckdb_amd64
+          unzip -p duckdb_cli-linux-arm64.zip duckdb > duckdb_arm64
+          chmod +x duckdb_*
+
+      - name: Create Dockerfile
+        shell: bash
+        run: |
+          cat > Dockerfile <<- EOM
+          FROM debian:bookworm-slim
+          ARG TARGETPLATFORM
+          ARG TARGETARCH
+          RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+          COPY duckdb_\$TARGETARCH /usr/local/bin/duckdb
+          CMD ["duckdb"]
+          EOM
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: duckdb-shell:test
+
+      - name: Test version
+        run: |
+          REPORTED_VER=`docker run --rm duckdb-shell:test duckdb -csv -noheader -c "SELECT version()"`
+          echo "Reported: $REPORTED_VER, Expected: v$VER"
+          [ "$REPORTED_VER" = "v$VER" ] || exit 1
+
+      - name: Test shell access
+        run: |
+          docker run --rm duckdb-shell:test /bin/sh -c "echo shell works"
+          docker run --rm duckdb-shell:test /bin/sh -c 'duckdb -c "SELECT version()"'
